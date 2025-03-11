@@ -1,0 +1,6 @@
+chromadb
+numpy
+pandas
+sentence_transformers
+torch
+tqdm
