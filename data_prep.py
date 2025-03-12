@@ -1,10 +1,11 @@
 from typing import List
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 
 def get_negative_samples(
     file_path: str,
-    max_char: int = 1000,
-    overlap: int = 300,
+    chunk_size: int = 800,
+    chunk_overlap: int = 400,
 ) -> List[str]:
     """
     Split a text file into overlapping chunks.
@@ -19,11 +20,10 @@ def get_negative_samples(
     """
     with open(file_path, "r", encoding="utf-8") as file:
         text = file.read()
-    chunks = [
-        text[i: i + max_char]
-        for i in range(0, len(text), max_char - overlap)
-        if i + max_char <= len(text)
-    ]
-    if len(text) % (max_char - overlap) != 0:
-        chunks.append(text[len(text) - max_char:])  # add last chunk
-    return chunks
+
+    text_splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
+        model_name="gpt-4",
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+    )
+    return text_splitter.split_text(text)
