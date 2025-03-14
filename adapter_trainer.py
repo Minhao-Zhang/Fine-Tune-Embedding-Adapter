@@ -137,6 +137,7 @@ class AdapterTrainer:
         train_data: dict,
         test_data: dict,
         negative_chunks: list[str],
+        all_chunks: list[str] = None,
         device: str = "cuda",
     ):
         """
@@ -147,23 +148,29 @@ class AdapterTrainer:
             train_data (dict): Training data containing questions and chunks.  Must have keys "question" and "chunk".
             test_data (dict): Test data containing questions and chunks. Must have keys "question" and "chunk".
             negative_chunks (list[str]): List of negative chunks for triplet loss.
+            all__chunks (list[str]): List of all chunks (This should include all the chunks in train, test and more)。
             device (str): The device to run the training on, defaults to "cuda".
         """
         self.device = torch.device(device)
         self.base_model = base_model.to(self.device)
         # Initialize the linear adapter with the embedding dimension of the base model
         # TODO: allow user to define this outside the fucntion
-        self.adapter = MLPAdapter(
-            self.base_model.get_sentence_embedding_dimension(), hidden_dim=2048).to(self.device)
+        self.adapter = LinearAdapter(
+            self.base_model.get_sentence_embedding_dimension()).to(self.device)
 
         train_chunks: list[str] = train_data["chunk"].tolist()
         test_chunks: list[str] = test_data["chunk"].tolist()
         # Find unique chunks and their embeddings to avoid redundant computations
-        unique_chunks: list[str] = list(set(train_chunks + test_chunks))
+        if all_chunks:
+            unique_chunks: list[str] = list(
+                set(all_chunks + train_chunks + test_chunks))
+        else:
+            unique_chunks: list[str] = list(set(train_chunks + test_chunks))
         print(f"Total unique chunks: {len(unique_chunks)}.")
 
         print("Pre-computing all embeddings...")
         print("This might take a while...")
+        start_time = time.time()
         with torch.no_grad():
             # Encode the training and test queries
             self.train_query_embed = self.base_model.encode(
@@ -177,6 +184,8 @@ class AdapterTrainer:
             # Encode the negative chunks
             self.negative_embed = self.base_model.encode(
                 negative_chunks, convert_to_tensor=True, device=self.device)
+        end_time = time.time()
+        print(f"All the embedding took: {end_time-start_time} seconds.")
 
         # Get the indices of the train and test chunks in the unique chunks list
         train_indices = [unique_chunks.index(chunk) for chunk in train_chunks]
@@ -221,13 +230,31 @@ class AdapterTrainer:
         """
         Calculates and prints the baseline performance of the SentenceTransformer model
         without the adapter.  This is done by evaluating the model directly using the ChromaEvaluator.
+
+        Returns:
+            dict: A dictionary containing the baseline metrics for train and test sets.
+                 Includes Hit@10, MRR@10, Precision@10, Recall@10, NDCG@10, and MAP@10.
         """
         result = self.evaluator.evaluate(None)
-        print(f"Evaluation of baseline:")
+        train_metrics = result['train']
+        test_metrics = result['test']
         print(
-            f"Train Set: Avg Hit Rate@10: {result['train']['average_hit_rate']:.4f}, Avg MRR@10: {result['train']['average_reciprocal_rank']:.4f}")
+            f"Train Set: Hit@10: {train_metrics['average_hit_rate']:.4f}, "
+            f"MRR@10: {train_metrics['average_reciprocal_rank']:.4f}, "
+            f"Precision@10: {train_metrics['average_precision']:.4f}, "
+            f"Recall@10: {train_metrics['average_recall']:.4f}, "
+            f"NDCG@10: {train_metrics['average_ndcg']:.4f}, "
+            f"MAP@10: {train_metrics['mean_average_precision']:.4f}"
+        )
         print(
-            f"Test Set: Avg Hit Rate@10: {result['test']['average_hit_rate']:.4f}, Avg MRR@10: {result['test']['average_reciprocal_rank']:.4f}")
+            f"Test Set: Hit@10: {test_metrics['average_hit_rate']:.4f}, "
+            f"MRR@10: {test_metrics['average_reciprocal_rank']:.4f}, "
+            f"Precision@10: {test_metrics['average_precision']:.4f}, "
+            f"Recall@10: {test_metrics['average_recall']:.4f}, "
+            f"NDCG@10: {test_metrics['average_ndcg']:.4f}, "
+            f"MAP@10: {test_metrics['mean_average_precision']:.4f}"
+        )
+        return result
 
     def train(
         self,
@@ -245,15 +272,20 @@ class AdapterTrainer:
         Fine-tunes the linear adapter.
 
         Args:
-            num_epochs (int): Number of training epochs, defaults to 20.
-            batch_size (int): Batch size for training, defaults to 32.
-            learning_rate (float): Learning rate for the optimizer, defaults to 3e-3.
-            warmup_steps (int): Number of warmup steps for the scheduler, defaults to 100.
-            max_grad_norm (float): Maximum gradient norm for clipping, defaults to 1.0.
-            margin (float): Margin for the TripletMarginLoss, defaults to 1.0.
-            save_path (str): Path to save the adapter weights, defaults to None.
-            eval_epoch (int): Evaluate every eval_epoch, defaults to 5.
-            save_epoch (int): Save the adapter every save_epoch, defaults to 10.
+            num_epochs(int): Number of training epochs, defaults to 20.
+            batch_size(int): Batch size for training, defaults to 32.
+            learning_rate(float): Learning rate for the optimizer, defaults to 3e-3.
+            warmup_steps(int): Number of warmup steps for the scheduler, defaults to 100.
+            max_grad_norm(float): Maximum gradient norm for clipping, defaults to 1.0.
+            margin(float): Margin for the TripletMarginLoss, defaults to 1.0.
+            save_path(str): Path to save the adapter weights, defaults to None.
+            eval_epoch(int): Evaluate every eval_epoch, defaults to 5.
+            save_epoch(int): Save the adapter every save_epoch, defaults to 10.
+
+        Returns:
+            List[dict]: A list of dictionaries containing the metrics for each epoch.
+                 Each dictionary includes the epoch number, training loss,
+                 training metrics, and test metrics.
         """
         print("Preparing for trianing...")
         # Create the DataLoader for training
@@ -270,6 +302,7 @@ class AdapterTrainer:
             optimizer, warmup_steps, total_steps)
 
         print("Started Training.")
+        epoch_metrics = []  # List to store metrics for each epoch
         for epoch in range(num_epochs):
             self.adapter.train()
             total_loss = 0.0
@@ -293,17 +326,41 @@ class AdapterTrainer:
                 # Update the total loss
                 total_loss += loss.item()
 
+            avg_loss = total_loss / len(dataloader)
             print(
-                f"Epoch {epoch+1}/{num_epochs}, Loss: {total_loss / len(dataloader):.4f}")
+                f"Epoch {epoch+1}/{num_epochs}, Loss: {avg_loss:.4f}")
 
             if (epoch + 1) % eval_epoch == 0:
                 # Evaluate the adapter
                 eval_results = self.evaluator.evaluate(self.adapter)
+                train_metrics = eval_results['train']
+                test_metrics = eval_results['test']
                 print(f"Evaluation after epoch {epoch+1}:")
                 print(
-                    f"Train Set: Avg Hit Rate@10: {eval_results['train']['average_hit_rate']:.4f}, Avg MRR@10: {eval_results['train']['average_reciprocal_rank']:.4f}")
+                    f"Train Set: Hit@10: {train_metrics['average_hit_rate']:.4f}, "
+                    f"MRR@10: {train_metrics['average_reciprocal_rank']:.4f}, "
+                    f"Precision@10: {train_metrics['average_precision']:.4f}, "
+                    f"Recall@10: {train_metrics['average_recall']:.4f}, "
+                    f"NDCG@10: {train_metrics['average_ndcg']:.4f}, "
+                    f"MAP@10: {train_metrics['mean_average_precision']:.4f}"
+                )
                 print(
-                    f"Test Set: Avg Hit Rate@10: {eval_results['test']['average_hit_rate']:.4f}, Avg MRR@10: {eval_results['test']['average_reciprocal_rank']:.4f}")
+                    f"Test Set: Hit@10: {test_metrics['average_hit_rate']:.4f}, "
+                    f"MRR@10: {test_metrics['average_reciprocal_rank']:.4f}, "
+                    f"Precision@10: {test_metrics['average_precision']:.4f}, "
+                    f"Recall@10: {test_metrics['average_recall']:.4f}, "
+                    f"NDCG@10: {test_metrics['average_ndcg']:.4f}, "
+                    f"MAP@10: {test_metrics['mean_average_precision']:.4f}"
+                )
+
+                # Store metrics for the current epoch
+                epoch_data = {
+                    "epoch": epoch + 1,
+                    "train_loss": avg_loss,
+                    "train_metrics": train_metrics,
+                    "test_metrics": test_metrics,
+                }
+                epoch_metrics.append(epoch_data)
 
             if save_path and (epoch + 1) % save_epoch == 0:
                 # Save the adapter weights
@@ -312,3 +369,4 @@ class AdapterTrainer:
                 print(
                     f"Adapter saved at {save_path}/adapter_{epoch+1}.pth")
         print("Training finished.")
+        return epoch_metrics
