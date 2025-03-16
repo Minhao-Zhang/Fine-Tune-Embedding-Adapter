@@ -26,9 +26,11 @@ negative.extend(get_negative_samples("data/pg1342.txt"))
 negative.extend(get_negative_samples("data/pg2641.txt"))
 negative.extend(get_negative_samples("data/pg2701.txt"))
 
+# all-MiniLM-L12-v2
+# all-mpnet-base-v2
 
 base_model = SentenceTransformer(
-    "all-mpnet-base-v2", trust_remote_code=True, device="cuda")
+    "all-MiniLM-L12-v2", trust_remote_code=True, device="cuda")
 
 trainer = AdapterTrainer(base_model, train, test,
                          negative, all_chunks=None, device="cuda")
@@ -36,9 +38,9 @@ trainer = AdapterTrainer(base_model, train, test,
 trainer.calculate_baseline()
 
 trainer.train(
-    num_epochs=500,
+    num_epochs=2000,
     batch_size=256,
     eval_epoch=50,
-    save_epoch=50,
+    save_epoch=200,
     save_path="models"
 )
