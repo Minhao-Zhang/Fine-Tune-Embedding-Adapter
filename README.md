@@ -70,8 +70,8 @@ For models like `all-mpnet-base-v2` with dimension of 768, a simple `LinearAdapt
 ## Results 
 
 Note, the result of this approach varies drastically with your dataset and your questions. 
-I tried this on two of my own RAG system, they showed significiant improvement in one and performance degradation in the other.
-Plese experiement with before actually apply it.
+I tried this on two of my own RAG systems, they showed significiant improvement in one and obvious performance degradation in the other.
+Please experiement with before actually apply it.
 But you can always undo this by removing the adapter layer. 
 
 ## Acknowledgement
